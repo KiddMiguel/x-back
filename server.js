@@ -6,7 +6,7 @@ const WebSocket = require("ws");
 const cors = require('cors');
 const authRoutes = require('./routes/auth');
 const messageRoutes = require('./routes/message'); // Ajouter cette ligne
-const broadcast = require('./utils/broadCast'); // Ajouter l'import en haut du fichier
+const Message = require('./models/Message'); // Ajouter cet import
 
 dotenv.config();
 
@@ -21,53 +21,79 @@ const connectedUsers = new Map();
 
 wss.on("connection", function connection(ws) {
     let userId = null;
+    let userInfo = null;
 
-    ws.on("message", function incoming(data) {
+    ws.on("message", async function incoming(data) {
         try {
             const messageData = JSON.parse(data);
-            
+            console.log('Message reçu:', messageData);
+
             switch (messageData.type) {
                 case 'auth':
-                    // Authentification de l'utilisateur
                     userId = messageData.userId;
-                    connectedUsers.set(userId, {
+                    userInfo = {
                         ws: ws,
-                        username: messageData.username
-                    });
+                        username: messageData.username,
+                        status: 'online'
+                    };
+                    connectedUsers.set(userId, userInfo);
                     broadcastUserList();
+                    // Envoyer l'historique des messages à l'utilisateur qui vient de se connecter
+                    sendMessageHistory(ws, userId);
                     break;
 
                 case 'private_message':
-                    // Gestion des messages privés
-                    const recipient = connectedUsers.get(messageData.recipientId);
-                    if (recipient && recipient.ws.readyState === WebSocket.OPEN) {
-                        const messageToSend = {
-                            type: 'private_message',
-                            content: messageData.content,
-                            senderId: userId,
-                            senderName: connectedUsers.get(userId).username,
-                            timestamp: new Date().toISOString()
-                        };
-                        recipient.ws.send(JSON.stringify(messageToSend));
-                        ws.send(JSON.stringify({...messageToSend, delivered: true}));
-                    } else {
+                    if (!userId) {
                         ws.send(JSON.stringify({
                             type: 'error',
-                            content: 'Utilisateur non connecté'
+                            content: 'Vous devez être authentifié'
+                        }));
+                        return;
+                    }
+
+                    const recipient = connectedUsers.get(messageData.recipientId);
+                    const messageToStore = new Message({
+                        sender: userId,
+                        recipient: messageData.recipientId,
+                        content: messageData.content
+                    });
+
+                    await messageToStore.save();
+
+                    const messageToSend = {
+                        type: 'private_message',
+                        messageId: messageToStore._id,
+                        content: messageData.content,
+                        senderId: userId,
+                        senderName: userInfo.username,
+                        timestamp: new Date().toISOString()
+                    };
+
+                    // Envoyer au destinataire s'il est connecté
+                    if (recipient && recipient.ws.readyState === WebSocket.OPEN) {
+                        recipient.ws.send(JSON.stringify(messageToSend));
+                        ws.send(JSON.stringify({
+                            ...messageToSend,
+                            status: 'delivered'
+                        }));
+                    } else {
+                        ws.send(JSON.stringify({
+                            ...messageToSend,
+                            status: 'pending'
                         }));
                     }
                     break;
 
-                case 'broadcast':
-                    // Message pour tout le monde
-                    const broadcastMessage = {
-                        type: 'broadcast',
-                        content: messageData.content,
-                        senderId: userId,
-                        senderName: connectedUsers.get(userId).username,
-                        timestamp: new Date().toISOString()
-                    };
-                    broadcast(wss, broadcastMessage, 'broadcast');
+                case 'typing':
+                    const typingRecipient = connectedUsers.get(messageData.recipientId);
+                    if (typingRecipient && typingRecipient.ws.readyState === WebSocket.OPEN) {
+                        typingRecipient.ws.send(JSON.stringify({
+                            type: 'typing',
+                            senderId: userId,
+                            senderName: userInfo.username,
+                            isTyping: messageData.isTyping
+                        }));
+                    }
                     break;
             }
         } catch (error) {
@@ -95,19 +121,44 @@ wss.on("connection", function connection(ws) {
     });
 });
 
+async function sendMessageHistory(ws, userId) {
+    try {
+        const messages = await Message.find({
+            $or: [
+                { sender: userId },
+                { recipient: userId }
+            ]
+        })
+        .sort({ timestamp: -1 })
+        .limit(50)
+        .populate('sender', 'username');
+
+        ws.send(JSON.stringify({
+            type: 'message_history',
+            messages: messages
+        }));
+    } catch (error) {
+        console.error('Erreur lors de la récupération de l\'historique:', error);
+    }
+}
+
 function broadcastUserList() {
     const userList = Array.from(connectedUsers.entries()).map(([id, user]) => ({
         userId: id,
         username: user.username,
-        online: true
+        status: user.status
     }));
 
-    const message = {
+    const message = JSON.stringify({
         type: 'user_list',
         users: userList
-    };
+    });
 
-    broadcast(wss, message, 'system');
+    wss.clients.forEach(client => {
+        if (client.readyState === WebSocket.OPEN) {
+            client.send(message);
+        }
+    });
 }
 
 // Configuration CORS plus détaillée

@@ -8,40 +8,26 @@ const router = express.Router();
 const JWT_SECRET = process.env.JWT_SECRET || "supersecretkey";
 
 router.post('/register', [
-	body('*.username').notEmpty().withMessage("Le nom d'utilisateur est requis"),
-	body('*.email').isEmail().withMessage("Email invalide"),
-	body('*.password').isLength({ min: 6 }).withMessage("Le mot de passe doit avoir au moins 6 caractères")
+	body('username').notEmpty().withMessage("Le nom d'utilisateur est requis"),
+	body('email').isEmail().withMessage("Email invalide"),
+	body('password').isLength({ min: 6 }).withMessage("Le mot de passe doit avoir au moins 6 caractères")
 ], async (req, res) => {
 	const errors = validationResult(req);
 	if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+ 
+	const { username, email, password } = req.body;
 
 	try {
-		const data = Array.isArray(req.body) ? req.body : [req.body];
-		const results = [];
+		let user = await User.findOne({ email });
+		if (user) return res.status(400).json({ message: "Email déjà utilisé" });
 
-		for (const userData of data) {
-			const { username, email, password } = userData;
+		const hashedPassword = await bcrypt.hash(password, 10);
+		user = new User({ username, email, password: hashedPassword });
 
-			let existingUser = await User.findOne({ email });
-			if (existingUser) {
-				results.push({ email, status: 'error', message: "Email déjà utilisé" });
-				continue;
-			}
+		await user.save();
 
-			const hashedPassword = await bcrypt.hash(password, 10);
-			const user = new User({ username, email, password: hashedPassword });
-			await user.save();
-
-			const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: '7d' });
-			results.push({
-				status: 'success',
-				token,
-				user: { id: user.id, username, email }
-			});
-		}
-
-		const response = Array.isArray(req.body) ? results : results[0];
-		res.status(201).json(response);
+		const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: '7d' });
+		res.status(201).json({ token, user: { id: user.id, username, email } });
 	} catch (err) {
 		res.status(500).json({ message: err.message });
 	}
@@ -76,7 +62,7 @@ router.get('/users', async (req, res) => {
 	try {
 		const users = await User.find()
 			.select('_id username lastMessage')
-			.lean().limit(10);
+			.lean();
 
 		const formattedUsers = users.map(user => ({
 			id: user._id,
