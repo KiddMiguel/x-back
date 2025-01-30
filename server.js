@@ -7,6 +7,7 @@ const cors = require('cors');
 const authRoutes = require('./routes/auth');
 const messageRoutes = require('./routes/message'); // Ajouter cette ligne
 const Message = require('./models/Message'); // Ajouter cet import
+const User = require('./models/User'); // Ajouter l'import de User s'il n'existe pas déjà
 
 dotenv.config();
 
@@ -26,7 +27,7 @@ wss.on("connection", function connection(ws) {
     ws.on("message", async function incoming(data) {
         try {
             const messageData = JSON.parse(data);
-            console.log('Message reçu:', messageData);
+            // console.log('Message reçu:', messageData);
 
             switch (messageData.type) {
                 case 'auth':
@@ -54,11 +55,23 @@ wss.on("connection", function connection(ws) {
                     const recipient = connectedUsers.get(messageData.recipientId);
                     const messageToStore = new Message({
                         sender: userId,
-                        recipient: messageData.recipientId,
+                        receiver: messageData.recipientId,
                         content: messageData.content
                     });
 
                     await messageToStore.save();
+
+                    // Mise à jour du lastMessage pour l'expéditeur et le destinataire
+                    await Promise.all([
+                        User.findByIdAndUpdate(userId, { 
+                            lastMessage: messageData.content,
+                            lastMessageTimestamp: new Date()
+                        }),
+                        User.findByIdAndUpdate(messageData.recipientId, { 
+                            lastMessage: messageData.content,
+                            lastMessageTimestamp: new Date()
+                        })
+                    ]);
 
                     const messageToSend = {
                         type: 'private_message',
@@ -143,6 +156,7 @@ async function sendMessageHistory(ws, userId) {
 }
 
 function broadcastUserList() {
+	console.log('Broadcasting user list', connectedUsers);
     const userList = Array.from(connectedUsers.entries()).map(([id, user]) => ({
         userId: id,
         username: user.username,
